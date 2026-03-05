@@ -14,24 +14,37 @@ declare module 'foliate-js/view.js' {
     export interface Book {
         metadata?: BookMetadata;
         toc?: TOCItem[];
+        sections: unknown[];
         [key: string]: unknown;
     }
 
     export function makeBook(file: File | Blob): Promise<Book>;
 
-    export class View extends HTMLElement {
+    export interface FoliateRenderer extends HTMLElement {
+        setAttribute(name: string, value: string): void;
+        setStyles(styles: string): void;
+    }
+
+    export interface FoliateView extends HTMLElement {
+        renderer: FoliateRenderer;
         open(book: Book): Promise<void>;
         next(): void;
         prev(): void;
         goTo(href: string): void;
+        close?(): void;
+        addAnnotation(annotation: { value: string, color?: string }, remove?: boolean): Promise<unknown>;
+        deleteAnnotation(annotation: unknown): Promise<unknown>;
+        getCFI(index: number, range: Range): string;
     }
+
+    export class View extends HTMLElement {}
 }
 
-declare global {
-    namespace JSX {
-        interface IntrinsicElements {
-            'foliate-view': React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
-        }
+declare module 'foliate-js/overlayer.js' {
+    export class Overlayer {
+        static highlight(rects: DOMRect[], options?: { color?: string }): SVGElement;
+        static underline(rects: DOMRect[], options?: { color?: string }): SVGElement;
+        static outline(rects: DOMRect[], options?: { color?: string }): SVGElement;
     }
 }
 

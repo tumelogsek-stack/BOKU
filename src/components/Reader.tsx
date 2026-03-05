@@ -3,18 +3,86 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import type { TOCItem } from "foliate-js/view.js";
-import { getBook, updateProgress } from "../lib/db";
+
+export interface FoliateRenderer extends HTMLElement {
+    setAttribute(name: string, value: string): void;
+    setStyles(styles: string): void;
+}
+
+export interface FoliateView extends HTMLElement {
+    renderer: FoliateRenderer;
+    open(book: unknown): Promise<void>;
+    next(): void;
+    prev(): void;
+    goTo(href: string): void;
+    close?(): void;
+    addAnnotation(annotation: { value: string, color?: string }, remove?: boolean): Promise<unknown>;
+    deleteAnnotation(annotation: unknown): Promise<unknown>;
+    getCFI(index: number, range: Range): string;
+}
+import { getBook, updateProgress, saveHighlight, getHighlightsByBook, type Highlight } from "../lib/db";
 
 interface ReaderProps {
   bookId: string;
+  highlightCfi?: string;
   onBack: () => void;
+  onBackToHighlights?: () => void;
 }
 
-export default function Reader({ bookId, onBack }: ReaderProps) {
+const getFontFaces = (origin: string) => `
+  @font-face {
+    font-family: 'Nunito';
+    src: url('${origin}/fonts/Nunito-Regular.ttf') format('truetype');
+    font-weight: 400;
+    font-style: normal;
+  }
+  @font-face {
+    font-family: 'Nunito';
+    src: url('${origin}/fonts/Nunito-Bold.ttf') format('truetype');
+    font-weight: 700;
+    font-style: normal;
+  }
+  @font-face {
+    font-family: 'Literata';
+    src: url('${origin}/fonts/Literata-Regular.ttf') format('truetype');
+    font-weight: 400;
+    font-style: normal;
+  }
+  @font-face {
+    font-family: 'Literata';
+    src: url('${origin}/fonts/Literata-Italic.ttf') format('truetype');
+    font-weight: 400;
+    font-style: italic;
+  }
+  @font-face {
+    font-family: 'Roboto';
+    src: url('${origin}/fonts/Roboto-Regular.ttf') format('truetype');
+    font-weight: 400;
+    font-style: normal;
+  }
+  @font-face {
+    font-family: 'Roboto';
+    src: url('${origin}/fonts/Roboto-Bold.ttf') format('truetype');
+    font-weight: 700;
+    font-style: normal;
+  }
+`;
+
+const KEY_MAPPINGS = {
+  next: ['ArrowRight', ' ', 'Space'],
+  prev: ['ArrowLeft'], // Shift+Space is handled manually in check
+  toggle: ['Enter', 'Escape']
+};
+
+export default function Reader({ bookId, highlightCfi, onBack, onBackToHighlights }: ReaderProps) {
   const viewerRef = useRef<HTMLDivElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [theme, setTheme] = useState<"light" | "dark" | "sepia" | "sage" | "ink">("light");
+  const [fontFamily, setFontFamily] = useState<string>("Georgia");
+  const [fontSize, setFontSize] = useState<string>("100%");
+  const [layout, setLayout] = useState<"default" | "wide">("default");
   const [isThemeOpen, setIsThemeOpen] = useState(false);
+  const [isTextMenuOpen, setIsTextMenuOpen] = useState(false);
   const [metadata, setMetadata] = useState<{ title?: string; author?: string } | null>(null);
   const [toc, setToc] = useState<TOCItem[] | null>(null);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -25,12 +93,76 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
   const initialCfiRef = useRef<string | null>(null);
   const [touchFeedback, setTouchFeedback] = useState<{ x: number, y: number, type: 'prev' | 'next' | 'toggle' } | null>(null);
   const actionRef = useRef<((type: 'prev' | 'next' | 'toggle', x?: number, y?: number) => void) | null>(null);
+  const highlightsRef = useRef<Highlight[]>([]);
+  const activeDocRef = useRef<Document | null>(null);
+  const themeMenuRef = useRef<HTMLDivElement>(null);
+  const textMenuRef = useRef<HTMLDivElement>(null);
+  const fontFamilyRef = useRef(fontFamily);
+  const fontSizeRef = useRef(fontSize);
+  const layoutRef = useRef<"default" | "wide">("default");
+  
+  const [originalCfi, setOriginalCfi] = useState<string | null>(null);
+  const originalCfiRef = useRef<string | null>(null);
+  const originalFractionRef = useRef<number>(0);
+  const lastUIToggleRef = useRef<number>(0);
+  const currentFractionRef = useRef<number>(0);
+  const abortControllersRef = useRef<Map<Document, AbortController>>(new Map());
+  const syncChannelRef = useRef<BroadcastChannel | null>(null);
+  const highlightToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const [keyMappings] = useState({
-    next: ['ArrowRight', ' ', 'Space'],
-    prev: ['ArrowLeft'], // Shift+Space is handled manually in check
-    toggle: ['Enter', 'Escape']
-  });
+  // Synchronous ref sync helper
+  const updateOriginalCfi = useCallback((val: string | null) => {
+    setOriginalCfi(val);
+    originalCfiRef.current = val;
+  }, []);
+
+  
+  // Keep refs in sync with state
+  useEffect(() => {
+    fontFamilyRef.current = fontFamily;
+  }, [fontFamily]);
+  
+  useEffect(() => {
+    fontSizeRef.current = fontSize;
+  }, [fontSize]);
+
+  useEffect(() => {
+    layoutRef.current = layout;
+  }, [layout]);
+
+
+
+  // Highlight toolbar state
+  const [highlightToolbar, setHighlightToolbar] = useState<{
+    text: string;
+    x: number;
+    y: number;
+    cfi: string;
+  } | null>(null);
+  const [highlightToast, setHighlightToast] = useState(false);
+  const selectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const animatingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const uiTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup timers and listeners on unmount
+  useEffect(() => {
+    const controllers = abortControllersRef.current;
+    return () => {
+      if (animatingTimerRef.current) clearTimeout(animatingTimerRef.current);
+      if (uiTimeoutRef.current) clearTimeout(uiTimeoutRef.current);
+      if (selectionTimeoutRef.current) clearTimeout(selectionTimeoutRef.current);
+      if (highlightToastTimerRef.current) clearTimeout(highlightToastTimerRef.current);
+      
+      // Cleanup all abort controllers
+      controllers.forEach(ac => ac.abort());
+      controllers.clear();
+
+      if (syncChannelRef.current) {
+        syncChannelRef.current.close();
+        syncChannelRef.current = null;
+      }
+    };
+  }, []);
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     // Avoid double-handling if event was already processed (e.g. by iframe handler bubbling to window)
@@ -43,18 +175,23 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
     const width = window.innerWidth;
     const height = window.innerHeight;
 
-    if (keyMappings.next.includes(key) && !shiftKey) {
+    if (KEY_MAPPINGS.next.includes(key) && !shiftKey) {
       e.preventDefault();
       actionRef.current?.('next', width * 0.8, height / 2);
-    } else if (keyMappings.prev.includes(key) || (key === ' ' && shiftKey)) {
+    } else if (KEY_MAPPINGS.prev.includes(key) || (key === ' ' && shiftKey)) {
       e.preventDefault();
       actionRef.current?.('prev', width * 0.2, height / 2);
-    } else if (keyMappings.toggle.includes(key) && key !== 'Escape') {
+    } else if (KEY_MAPPINGS.toggle.includes(key) && key !== 'Escape') {
       // Don't prevent default for Escape key to allow browser back navigation
       e.preventDefault();
       actionRef.current?.('toggle', width / 2, height / 2);
     }
-  }, [keyMappings]);
+  }, []);
+
+  const handleKeyDownRef = useRef(handleKeyDown);
+  useEffect(() => {
+    handleKeyDownRef.current = handleKeyDown;
+  }, [handleKeyDown]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
@@ -68,6 +205,20 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
     const nextTheme = saved && ["light","dark","sepia","sage","ink"].includes(saved) ? saved : "light";
     setTheme(nextTheme as typeof theme);
     document.documentElement.setAttribute("data-theme", nextTheme as string);
+
+    // Load saved text settings
+    const savedFont = localStorage.getItem("reader-font");
+    if (savedFont) setFontFamily(savedFont);
+    
+    const savedSize = localStorage.getItem("reader-size");
+    if (savedSize) setFontSize(savedSize);
+
+    const savedLayout = localStorage.getItem('reader-layout') as 'default' | 'wide' | null;
+    if (savedLayout && (savedLayout === 'default' || savedLayout === 'wide')) {
+      setLayout(savedLayout);
+    } else {
+      localStorage.removeItem('reader-layout');
+    }
   }, []);
 
   // Load book from DB
@@ -76,11 +227,39 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
       getBook(bookId).then(book => {
         if (book) {
           setFile(book.file);
-          if (book.progressCfi) {
+          if (highlightCfi) {
+            if (book.progressCfi) {
+              updateOriginalCfi(book.progressCfi);
+              originalFractionRef.current = book.progressFraction ?? 0;
+            }
+            initialCfiRef.current = highlightCfi;
+          } else if (book.progressCfi) {
             initialCfiRef.current = book.progressCfi;
           }
         }
       });
+    }
+  }, [bookId, highlightCfi, updateOriginalCfi]);
+
+  // Load highlights from DB and listen for sync
+  useEffect(() => {
+    if (bookId) {
+      const load = () => getHighlightsByBook(bookId).then(h => {
+        highlightsRef.current = h;
+      });
+      load();
+
+      const channel = new BroadcastChannel('foliate-highlights-sync');
+      syncChannelRef.current = channel;
+      channel.onmessage = (event) => {
+        if (event.data.type === 'REFRESH_HIGHLIGHTS' && event.data.bookId === bookId) {
+          load();
+        }
+      };
+      return () => {
+        channel.close();
+        syncChannelRef.current = null;
+      };
     }
   }, [bookId]);
 
@@ -91,36 +270,100 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
     setIsThemeOpen(false);
   };
 
+  const applyFont = (font: string) => {
+    setFontFamily(font);
+    localStorage.setItem("reader-font", font);
+  };
+
+  const applyFontSize = (size: string) => {
+    setFontSize(size);
+    localStorage.setItem("reader-size", size);
+  };
+
+  const applyLayout = (l: "default" | "wide") => {
+    setLayout(l);
+    localStorage.setItem("reader-layout", l);
+    const viewer = viewerRef.current?.querySelector("foliate-view") as FoliateView | null;
+    const renderer = viewer?.renderer;
+    if (renderer?.setAttribute) {
+      if (l === "wide") {
+        renderer.setAttribute("spread", "none");
+        renderer.setAttribute("max-column-count", "1");
+        renderer.setAttribute("max-inline-size", "9999px");
+      } else {
+        renderer.setAttribute("spread", "none");
+        renderer.setAttribute("max-column-count", "2");
+        renderer.setAttribute("max-inline-size", "720px");
+      }
+    }
+  };
+
+
   const toggleUI = useCallback(() => {
+    // We use a timestamp to prevent immediate re-triggering by hover events
+    const now = Date.now();
+    if (lastUIToggleRef.current && now - lastUIToggleRef.current < 500) return;
+    lastUIToggleRef.current = now;
+
     setShowHeader(prev => !prev);
-    setShowControls(prev => !prev);
+    setShowControls(prev => {
+      const next = !prev;
+      if (uiTimeoutRef.current) clearTimeout(uiTimeoutRef.current);
+      if (next) {
+        uiTimeoutRef.current = setTimeout(() => {
+          setShowHeader(false);
+          setShowControls(false);
+        }, 3000);
+      }
+      return next;
+    });
   }, []);
 
-  const triggerAction = useCallback((type: 'prev' | 'next' | 'toggle', x?: number, y?: number) => {
-    const viewer = viewerRef.current?.querySelector("foliate-view");
-    // Only allow toggle if viewer is not ready, otherwise require viewer
-    if (!viewer && type !== 'toggle') return;
+  const handleHoverUI = (visible: boolean) => {
+    // Separate guard for hover to avoid blocking legitimate hover events
+    // but still protect against rapid flickers if needed.
+    // We don't use the toggle guard here to avoid blocking hover after a click.
+    
+    // On mobile/touch devices, we might want to disable hover triggers entirely
+    // simple check for hover capability
+    if (window.matchMedia('(hover: hover)').matches) {
+        if (uiTimeoutRef.current) clearTimeout(uiTimeoutRef.current);
+        if (!visible) {
+          // Small delay so moving between sentinel → controls doesn't cause flicker
+          uiTimeoutRef.current = setTimeout(() => {
+            setShowHeader(false);
+            setShowControls(false);
+          }, 150);
+        } else {
+          setShowHeader(true);
+          setShowControls(true);
+        }
+    }
+  };
 
+  const triggerAction = useCallback((type: 'prev' | 'next' | 'toggle', x?: number, y?: number) => {
+    if (!file) return;
+    const viewer = viewerRef.current?.querySelector("foliate-view") as FoliateView | null;
     // Use center of screen if no coordinates provided
     const feedbackX = x ?? window.innerWidth / 2;
     const feedbackY = y ?? window.innerHeight / 2;
 
-    setTouchFeedback({ x: feedbackX, y: feedbackY, type });
-
     switch (type) {
       case 'prev':
-        // @ts-expect-error - Custom element method
+        setTouchFeedback({ x: feedbackX, y: feedbackY, type });
         viewer?.prev();
         break;
       case 'next':
-        // @ts-expect-error - Custom element method
+        setTouchFeedback({ x: feedbackX, y: feedbackY, type });
         viewer?.next();
         break;
       case 'toggle':
+        // Only show feedback for toggle if it's a confirmed center tap
+        if (x !== undefined) setTouchFeedback({ x: feedbackX, y: feedbackY, type });
         toggleUI();
         break;
     }
-  }, [toggleUI]);
+  }, [toggleUI, file]);
 
   // Keep actionRef up to date
   useEffect(() => {
@@ -137,15 +380,16 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
 
   useEffect(() => {
     if (!file || !viewerRef.current) return;
-    const viewer = viewerRef.current.querySelector("foliate-view");
-    // @ts-expect-error - Custom element property
+    const viewer = viewerRef.current.querySelector("foliate-view") as FoliateView | null;
     const renderer = viewer?.renderer;
     if (renderer && renderer.setStyles) {
       if (renderer.setAttribute) {
         renderer.setAttribute("max-inline-size", "100%");
-        renderer.setAttribute("max-block-size", "100%");
-        renderer.setAttribute("margin", "0");
+        renderer.setAttribute("max-block-size", '100%');
+        renderer.setAttribute("margin", "25px");
         renderer.setAttribute("gap", "0");
+        renderer.setAttribute('flow', 'paginated');
+        renderer.setAttribute('spread', 'none');
       }
 
       const themeColors = {
@@ -157,21 +401,27 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
       };
       const { text, bg } = themeColors[theme];
       const isDark = theme === "dark" || theme === "ink";
+      const origin = window.location.origin;
       
       renderer.setStyles(`
+        ${getFontFaces(origin)}
+        
         html, body { 
           width: 100% !important;
           height: 100% !important;
-          max-width: 100vw !important;
-          margin: 0 !important;
-          padding: 30px 30px !important;
+          max-width: 100% !important;
+          margin: 0 auto !important;
+          padding: 60px ${layout === "wide" ? "30px" : "10%"} !important;
           box-sizing: border-box !important;
           color: ${text} !important; 
           background-color: ${bg} !important; 
+          font-family: "${fontFamily}", serif !important;
+          font-size: ${fontSize} !important;
         }
         p, span, div, h1, h2, h3, h4, h5, h6 { 
           color: inherit !important; 
           background-color: transparent !important;
+          font-family: inherit !important;
         }
         a { 
           color: inherit !important; 
@@ -183,7 +433,7 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
         }
       `);
     }
-  }, [theme, file]);
+  }, [theme, file, fontFamily, fontSize, layout]);
 
   useEffect(() => {
     if (!file || !viewerRef.current) return;
@@ -195,6 +445,7 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
       try {
         // foliate-js is an ES module and needs specific file imports
         const { makeBook } = await import("foliate-js/view.js");
+        const { Overlayer } = await import("foliate-js/overlayer.js");
         if (cancelled) return;
 
         const bookData = await makeBook(file!);
@@ -229,27 +480,106 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
         });
 
         // Create the viewer element
-        const viewer = document.createElement("foliate-view");
+        const viewer = document.createElement("foliate-view") as unknown as FoliateView;
 
-        // @ts-expect-error - Custom element event
-        viewer.addEventListener("relocate", (e: CustomEvent) => {
-          if (bookId) {
-            updateProgress(bookId, e.detail.cfi, e.detail.fraction);
+        viewer.addEventListener("relocate", ((e: Event) => {
+          const detail = (e as CustomEvent).detail;
+          currentFractionRef.current = detail.fraction;
+          if (bookId && originalCfiRef.current === null) {
+            // Save progress only when not previewing a highlight
+            updateProgress(bookId, detail.cfi, detail.fraction);
           }
-          if (e.detail.tocItem) {
-            setCurrentChapter(e.detail.tocItem.label);
+          if (detail.tocItem) {
+            setCurrentChapter(detail.tocItem.label);
           } else {
             setCurrentChapter("");
           }
-        });
+        }) as EventListener);
+
+        viewer.addEventListener('draw-annotation', ((e: Event) => {
+            const { draw, annotation } = (e as CustomEvent).detail;
+            const { color } = annotation;
+            // Use hoisted Overlayer
+            draw(Overlayer.highlight, { color });
+        }) as EventListener);
+
+        viewer.addEventListener('create-overlay', ((e: Event) => {
+            const { index } = (e as CustomEvent).detail;
+            
+            // Robust CFI check: verify if highlight CFI belongs to this section
+            const section = bookData.sections[index] as { cfi?: string };
+            const baseCFI = section.cfi ?? `epubcfi(/6/${(index + 1) * 2})`;
+            const prefix = baseCFI.replace(/\)$/, '');
+            
+            highlightsRef.current.forEach(h => {
+                if (h.cfi && (h.cfi.startsWith(prefix + '!') || h.cfi === baseCFI)) {
+                    viewer.addAnnotation({ value: h.cfi, color: h.color });
+                }
+            });
+        }) as EventListener);
 
         // Attach listeners to the internal document when loaded
-        // @ts-expect-error - Custom element event
-        viewer.addEventListener("load", (e: CustomEvent) => {
-          const doc = e.detail.doc as Document;
+        viewer.addEventListener("load", ((e: Event) => {
+          const { doc, index } = (e as CustomEvent).detail;
           
+          // Store active document for later use (e.g. clearing selection)
+          activeDocRef.current = doc;
+
+          // Abort previous listeners for this document if any
+          const oldAC = abortControllersRef.current.get(doc);
+          if (oldAC) oldAC.abort();
+          
+          const ac = new AbortController();
+          abortControllersRef.current.set(doc, ac);
+          const { signal } = ac;
+
           // Attach shared keydown handler to iframe document to ensure keys work when focused
-          doc.addEventListener('keydown', handleKeyDown);
+          doc.addEventListener('keydown', (ev: KeyboardEvent) => handleKeyDownRef.current(ev), { signal });
+
+          // Selection change handling
+          doc.addEventListener('selectionchange', () => {
+            // Debounce: wait for selection to stabilize
+            if (selectionTimeoutRef.current) clearTimeout(selectionTimeoutRef.current);
+            selectionTimeoutRef.current = setTimeout(() => {
+              const sel = doc.getSelection();
+              if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) {
+                 setShowHeader(false);
+                 setShowControls(false);
+              }
+
+              if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+                setHighlightToolbar(null);
+                return;
+              }
+              const text = sel.toString().trim();
+              if (text.length < 3) return; // ignore tiny selections
+
+              const range = sel.getRangeAt(0);
+              const rect = range.getBoundingClientRect();
+              const iframeEl = doc.defaultView?.frameElement;
+              const iframeRect = iframeEl?.getBoundingClientRect();
+              
+              const iframeTop = iframeRect?.top ?? 0;
+              const iframeLeft = iframeRect?.left ?? 0;
+              const toolX = iframeLeft + rect.left + rect.width / 2;
+              
+              const TOOLBAR_HEIGHT = 50; // Approx height including padding
+              const absoluteTop = iframeTop + rect.top;
+              const absoluteBottom = iframeTop + rect.bottom;
+              
+              let toolY = absoluteTop - 10;
+              
+              // If not enough space above, position below
+              if (absoluteTop < TOOLBAR_HEIGHT + 10) {
+                  toolY = absoluteBottom + 10 + TOOLBAR_HEIGHT;
+              }
+              
+              // Get CFI for selection
+              const cfi = viewer.getCFI(index, range);
+
+              setHighlightToolbar({ text, x: toolX, y: toolY, cfi });
+            }, 300);
+          }, { signal });
 
           // Pointer tracking for click vs drag distinction
           doc.addEventListener("pointerdown", (ev: PointerEvent) => {
@@ -257,10 +587,9 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
                x: ev.clientX,
                y: ev.clientY
              };
-          });
+          }, { signal });
 
           // Navigation handling inside iframe
-          // Use pointerup instead of click to distinguish touch from mouse.
           doc.addEventListener("pointerup", (ev: PointerEvent) => {
             const start = pointerStartRef.current;
             pointerStartRef.current = null; // reset
@@ -304,69 +633,89 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
               ev.preventDefault(); // Prevent ghost clicks
               actionRef.current?.('toggle', outerX, outerY);
             }
-          });
-        });
+          }, { signal });
+
+          // Cleanup listeners when viewer emits a "unload" or "load" again
+          // Foliate-js doesn't have a reliable "unload" event for specific documents,
+          // but removing the viewer (on unmount) or the document being garbage collected 
+          // usually cleans up listeners. However, for selectionchange on 'doc', 
+          // we should be careful if the same doc is reused.
+        }) as EventListener);
 
         if (cancelled) return;
         
         // Clean up any existing viewer before adding the new one
-        const oldViewer = container.querySelector("foliate-view");
+        const oldViewer = container.querySelector("foliate-view") as FoliateView | null;
         if (oldViewer) {
           try {
-            // @ts-expect-error - Custom element method
             if (oldViewer.close) oldViewer.close();
           } catch { /* ignore */ }
           oldViewer.remove();
         }
         container.appendChild(viewer);
 
-        // @ts-expect-error - Custom element method
         await viewer.open(bookData);
         if (cancelled) return;
 
+        // Apply all existing highlights after book is opened
+        highlightsRef.current.forEach(h => {
+            viewer.addAnnotation({ value: h.cfi, color: h.color });
+        });
+
         // Restore progress
         if (initialCfiRef.current) {
-           // @ts-expect-error - Custom element method
            viewer.goTo(initialCfiRef.current);
            // Clear it so it's not reused if the effect re-runs for some reason
            initialCfiRef.current = null;
         }
 
-        // @ts-expect-error - Accessing internal renderer to set layout
         const renderer = viewer.renderer;
         if (renderer) {
-          renderer.setAttribute("max-inline-size", "100%");
+          renderer.setAttribute("max-column-count", layoutRef.current === "wide" ? "1" : "2");
+          renderer.setAttribute("max-inline-size", layoutRef.current === "wide" ? "9999px" : "720px");
           renderer.setAttribute("max-block-size", "100%");
-          renderer.setAttribute("margin", "0");
+          renderer.setAttribute("margin", "25px");
           renderer.setAttribute("gap", "0");
+          renderer.setAttribute('flow', 'paginated');
+          renderer.setAttribute('spread', 'none');
           
-          // Initial style injection
-          const themeColors = {
+          // Initial style injection - use current state
+          // Note: The separate effect will also run, but we set initial styles here to avoid FOUC
+          const t = document.documentElement.getAttribute("data-theme") as typeof theme || "light";
+           const { text, bg } = {
             light: { text: "#333333", bg: "#FFFFFF" },
             dark: { text: "#FFFFFF", bg: "#000000" },
             sepia: { text: "#5C4033", bg: "#F4F1E8" },
             sage: { text: "#FFFFFF", bg: "#798165" },
             ink: { text: "#E6D2B5", bg: "#2C2725" },
-          };
-          const t = document.documentElement.getAttribute("data-theme") as typeof theme || "light";
-           const { text, bg } = themeColors[t] || themeColors.light;
+          }[t] || { text: "#333333", bg: "#FFFFFF" };
            const isDark = t === "dark" || t === "ink";
+           const origin = window.location.origin;
+           
+           // We use the current state values for initial render
+           // Since this effect only runs on file/bookId change, these values are snapshot at that time
+           // The dedicated style effect will handle updates.
 
            if (renderer.setStyles) {
               renderer.setStyles(`
+                 ${getFontFaces(origin)}
+                 
                  html, body { 
                    width: 100% !important;
                    height: 100% !important;
-                   max-width: 100vw !important;
-                   margin: 0 !important;
-                   padding: 30px 30px !important;
+                   max-width: 100% !important;
+                   margin: 0 auto !important;
+                   padding: 60px ${layoutRef.current === "wide" ? "30px" : "10%"} !important;
                    box-sizing: border-box !important;
                    color: ${text} !important; 
                    background-color: ${bg} !important; 
+                   font-family: "${fontFamilyRef.current}", serif !important;
+                   font-size: ${fontSizeRef.current} !important;
                  }
                  p, span, div, h1, h2, h3, h4, h5, h6 { 
                    color: inherit !important; 
                    background-color: transparent !important;
+                   font-family: inherit !important;
                  }
                  a { 
                    color: inherit !important; 
@@ -391,42 +740,112 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
     // Cleanup: properly close the viewer to disconnect its internal observers
     return () => {
       cancelled = true;
-      const viewer = container.querySelector("foliate-view");
+      const viewer = container.querySelector("foliate-view") as FoliateView | null;
       if (viewer) {
         try {
-          // @ts-expect-error - Custom element method
           if (viewer.close) viewer.close();
         } catch { /* ignore close errors */ }
         viewer.remove();
       }
     };
-  }, [file, bookId, handleKeyDown]); // Re-init when file, bookId or handleKeyDown changes. triggerAction is accessed via actionRef inside event handlers.
+  // handleKeyDownRef is used to avoid re-initializing the reader when handlers change.
+  }, [file, bookId]); 
 
-  const nextPager = () => {
-    const viewer = viewerRef.current?.querySelector("foliate-view");
-    // @ts-expect-error - Custom element method
-    if (viewer) viewer.next();
-  };
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (themeMenuRef.current && !themeMenuRef.current.contains(event.target as Node)) {
+        setIsThemeOpen(false);
+      }
+      if (textMenuRef.current && !textMenuRef.current.contains(event.target as Node)) {
+        setIsTextMenuOpen(false);
+      }
+    }
 
-  const prevPager = () => {
-    const viewer = viewerRef.current?.querySelector("foliate-view");
-    // @ts-expect-error - Custom element method
-    if (viewer) viewer.prev();
-  };
+    if (isThemeOpen || isTextMenuOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [isThemeOpen, isTextMenuOpen]);
 
   const goToChapter = (href: string) => {
     const viewer = viewerRef.current?.querySelector("foliate-view");
     if (viewer) {
+      if (animatingTimerRef.current) clearTimeout(animatingTimerRef.current);
       setIsAnimating(true);
-      // @ts-expect-error - Custom element method
-      viewer.goTo(href);
-      setTimeout(() => setIsAnimating(false), 500); // Reset after animation
+      try {
+        // foliate-js goTo is fire-and-forget. 
+        // Note: TOC may use relative hrefs which mostly work, 
+        // but anchor fragments in some EPUBs can be problematic.
+        (viewer as FoliateView).goTo(href);
+        // Start animation clear timeout as a best-effort approximation
+        animatingTimerRef.current = setTimeout(() => {
+          setIsAnimating(false);
+          animatingTimerRef.current = null;
+        }, 500); 
+      } catch (err) {
+        console.error("Navigation error:", err);
+        setIsAnimating(false);
+        if (animatingTimerRef.current) {
+          clearTimeout(animatingTimerRef.current);
+          animatingTimerRef.current = null;
+        }
+      }
     }
     setIsMenuOpen(false);
   };
 
+  const handleReturnToPosition = () => {
+    const viewer = viewerRef.current?.querySelector("foliate-view") as FoliateView | null;
+    if (viewer && originalCfi !== null) {
+      if (originalCfi !== "") {
+        // 1. Clear guard first so relocate can save
+        const cfiToRestore = originalCfi;
+        const fractionToRestore = originalFractionRef.current;
+        updateOriginalCfi(null);
+        
+        // 2. Resave the position to DB explicitly
+        updateProgress(bookId, cfiToRestore, fractionToRestore); 
+        
+        // 3. Navigate
+        viewer.goTo(cfiToRestore);
+      } else {
+        updateOriginalCfi(null);
+      }
+    }
+  };
+
   return (
-    <div className={`readerContainer ${isAnimating ? "slide-in-right" : ""}`}>
+    <div className="readerContainer">
+      {file && originalCfi !== null && (
+        <div style={{
+          position: 'fixed',
+          bottom: '24px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          background: 'var(--panel-bg)',
+          border: '1px solid var(--glass-border)',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.12)',
+          borderRadius: '100px',
+          padding: '8px 16px',
+          display: 'flex',
+          gap: '12px',
+          zIndex: 1000,
+          backdropFilter: 'blur(20px)',
+          WebkitBackdropFilter: 'blur(20px)',
+          alignItems: 'center'
+        }}>
+          {onBackToHighlights && (
+            <button className="btn" onClick={onBackToHighlights} style={{ fontSize: '0.9rem', padding: '6px 16px', whiteSpace: 'nowrap' }}>
+              Back to Highlights
+            </button>
+          )}
+          <button className="btn" onClick={handleReturnToPosition} style={{ fontSize: '0.9rem', padding: '6px 16px', whiteSpace: 'nowrap', background: 'var(--accent-color)', color: 'white' }}>
+            Resume Reading
+          </button>
+        </div>
+      )}
       <style>{`
         /* TOC Menu Styles */
         .btnTOC {
@@ -479,8 +898,8 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
       {/* Header Trigger Zone */}
       <div 
         className="header-trigger"
-        onMouseEnter={() => setShowHeader(true)}
-        onMouseLeave={() => setShowHeader(false)}
+        onMouseEnter={() => handleHoverUI(true)}
+        onMouseLeave={() => handleHoverUI(false)}
         style={{ position: 'fixed', top: 0, width: '100%', zIndex: 100 }}
       >
         {/* Invisible area to catch mouse at top edge */}
@@ -498,20 +917,118 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
             {!metadata && <h1>Lumina Reader</h1>}
             {metadata && (
             <div className="bookMeta">
-                <button 
-                  className="bookChapterMobile btnTOC" 
-                  onClick={() => setIsMenuOpen(!isMenuOpen)}
-                  style={{ background: 'none', border: 'none', padding: 0, textAlign: 'left', cursor: 'pointer' }}
-                >
-                  {currentChapter || "Chapters"}
-                </button>
                 <span className="bookTitle">{metadata.title}</span>
                 <span className="bookAuthor">{metadata.author}</span>
               </div>
           )}
           </div>
           <div className="headerActions" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', position: 'relative' }}>
-            <div>
+            <button
+              className="btn"
+              onClick={() => applyLayout(layout === "default" ? "wide" : "default")}
+              title="Toggle layout"
+            >
+              {layout === "default" ? "Wide" : "Default"}
+            </button>
+            <div ref={textMenuRef} style={{ position: 'relative' }}>
+              <button
+                className="btn"
+                onClick={() => setIsTextMenuOpen(v => !v)}
+                aria-haspopup="menu"
+                aria-expanded={isTextMenuOpen}
+                aria-label="Text settings"
+              >
+                <span style={{ fontSize: '1.2rem', fontFamily: 'serif' }}>Aa</span>
+              </button>
+              {isTextMenuOpen && (
+                <div
+                  role="menu"
+                  style={{
+                    position: 'absolute',
+                    top: '2.5rem',
+                    right: 0,
+                    minWidth: '220px',
+                    background: 'var(--panel-bg)',
+                    border: '1px solid var(--glass-border)',
+                    boxShadow: 'var(--shadow)',
+                    borderRadius: '12px',
+                    padding: '1rem',
+                    zIndex: 1000,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '1rem'
+                  }}
+                >
+                  {/* Font Family Section */}
+                  <div>
+                    <div style={{ fontSize: '0.75rem', fontWeight: 600, opacity: 0.7, marginBottom: '0.5rem', paddingLeft: '0.5rem' }}>FONT</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                      {[
+                        { name: 'Georgia', label: 'Georgia' },
+                        { name: 'Palatino Linotype', label: 'Palatino' },
+                        { name: 'Helvetica', label: 'Helvetica' },
+                        { name: 'Nunito', label: 'Nunito' },
+                        { name: 'Literata', label: 'Literata' },
+                        { name: 'Roboto', label: 'Roboto' }
+                      ].map((f) => (
+                        <button
+                          key={f.name}
+                          className="btn"
+                          onClick={() => applyFont(f.name)}
+                          role="menuitemradio"
+                          aria-checked={fontFamily === f.name}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            width: '100%',
+                            padding: '0.5rem 0.75rem',
+                            fontFamily: f.name,
+                            background: fontFamily === f.name ? 'rgba(108, 92, 231, 0.1)' : 'transparent',
+                            color: fontFamily === f.name ? 'var(--accent-color)' : 'inherit'
+                          }}
+                        >
+                          {f.label}
+                          {fontFamily === f.name && (
+                            <span style={{ fontSize: '0.8rem' }}>✓</span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Font Size Section */}
+                  <div>
+                    <div style={{ fontSize: '0.75rem', fontWeight: 600, opacity: 0.7, marginBottom: '0.5rem', paddingLeft: '0.5rem' }}>SIZE</div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(0,0,0,0.05)', borderRadius: '8px', padding: '0.25rem' }}>
+                      <button 
+                        className="btn"
+                        onClick={() => {
+                          const current = parseInt(fontSize);
+                          if (current > 70) applyFontSize(`${current - 10}%`);
+                        }}
+                        style={{ width: '40px', height: '40px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                      >
+                        <span style={{ fontSize: '0.8rem' }}>A</span>
+                      </button>
+                      <span style={{ fontSize: '0.9rem', fontWeight: 500 }}>{fontSize}</span>
+                      <button 
+                        className="btn"
+                        onClick={() => {
+                          const current = parseInt(fontSize);
+                          if (current < 200) applyFontSize(`${current + 10}%`);
+                        }}
+                        style={{ width: '40px', height: '40px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                      >
+                        <span style={{ fontSize: '1.2rem' }}>A</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div ref={themeMenuRef} style={{ position: 'relative' }}>
               <button 
                 className="btn" 
                 onClick={() => setIsThemeOpen(v => !v)} 
@@ -574,7 +1091,7 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
               )}
             </div>
             {file && toc && (
-              <button className="btn btnTOC desktop-only" onClick={() => setIsMenuOpen(!isMenuOpen)}>
+              <button className="btn btnTOC" onClick={() => setIsMenuOpen(!isMenuOpen)}>
                 {isMenuOpen ? "Close Menu" : currentChapter || "Chapters"}
               </button>
             )}
@@ -592,7 +1109,7 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
               {toc.map((item, index) => (
                 <div key={index} className="tocItem">
                   <button 
-                    className="tocLink" 
+                    className={`tocLink ${currentChapter === item.label ? "active" : ""}`} 
                     onClick={() => item.href && goToChapter(item.href)}
                   >
                     {item.label}
@@ -602,7 +1119,7 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
                       {item.subitems.map((sub: TOCItem, subIndex: number) => (
                         <button 
                           key={subIndex} 
-                          className="tocLink tocSublink" 
+                          className={`tocLink tocSublink ${currentChapter === sub.label ? "active" : ""}`} 
                           onClick={() => sub.href && goToChapter(sub.href)}
                         >
                           {sub.label}
@@ -645,23 +1162,124 @@ export default function Reader({ bookId, onBack }: ReaderProps) {
         </div>
       )}
 
-      <div ref={viewerRef} className="viewer" />
+      <div ref={viewerRef} className={`viewer ${isAnimating ? "slide-in-right" : ""}`} />
+
+      {/* Highlight Toolbar */}
+      {highlightToolbar && (
+        <div
+          className="highlight-toolbar"
+          style={{
+            left: highlightToolbar.x,
+            top: highlightToolbar.y,
+          }}
+        >
+          {[
+            { color: '#FFD700', label: 'Gold' },
+            { color: '#FF6B6B', label: 'Coral' },
+            { color: '#6BCB77', label: 'Green' },
+            { color: '#4D96FF', label: 'Blue' },
+          ].map(c => (
+            <button
+              key={c.color}
+              className="highlight-toolbar-color"
+              style={{ background: c.color }}
+              title={c.label}
+              onClick={async (e) => {
+                e.stopPropagation();
+                const cfi = highlightToolbar.cfi;
+                const highlightData = {
+                  bookId,
+                  text: highlightToolbar.text,
+                  cfi: cfi,
+                  color: c.color,
+                  chapter: currentChapter || undefined,
+                  bookTitle: metadata?.title,
+                  bookAuthor: metadata?.author,
+                };
+
+                const newId = await saveHighlight(highlightData);
+                
+                // Sync across instances using persistent channel
+                if (syncChannelRef.current) {
+                    syncChannelRef.current.postMessage({ type: 'REFRESH_HIGHLIGHTS', bookId });
+                }
+                
+                // Update local ref so it persists during navigation
+                highlightsRef.current.push({
+                  ...highlightData,
+                  id: newId,
+                  createdAt: Date.now()
+                });
+                
+                // Immediately render the highlight in the viewer
+                const v = viewerRef.current?.querySelector("foliate-view") as FoliateView | null;
+                if (v) {
+                    v.addAnnotation({ value: cfi, color: c.color });
+                }
+
+                setHighlightToolbar(null);
+                
+                // Clear selection in the active document
+                try {
+                  activeDocRef.current?.getSelection()?.removeAllRanges();
+                } catch { /* ignore */ }
+                
+                // Show toast
+                setHighlightToast(true);
+                if (highlightToastTimerRef.current) clearTimeout(highlightToastTimerRef.current);
+                highlightToastTimerRef.current = setTimeout(() => {
+                    setHighlightToast(false);
+                    highlightToastTimerRef.current = null;
+                }, 2000);
+              }}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Highlight Toast */}
+      {highlightToast && (
+        <div className="highlight-toast">
+          ✨ Highlight saved
+        </div>
+      )}
 
       {file && (
         <div 
           className="controls-trigger"
-          onMouseEnter={() => setShowControls(true)}
-          onMouseLeave={() => setShowControls(false)}
-          style={{ position: 'fixed', bottom: 0, width: '100%', zIndex: 100 }}
+          style={{ 
+            position: 'fixed', 
+            bottom: 0, 
+            width: '100%', 
+            zIndex: 100,
+            pointerEvents: 'none' // Wrapper shouldn't block clicks
+          }}
         >
-          {/* Invisible area to catch mouse at bottom edge */}
-          <div style={{ height: '80px', width: '100%', position: 'absolute', bottom: 0 }} />
+          {/* Thin 20px sentinel strip to catch hover without blocking text above it */}
+          <div 
+            style={{ height: '20px', width: '100%', position: 'absolute', bottom: 0, pointerEvents: 'auto' }}
+            onMouseEnter={() => handleHoverUI(true)}
+            onMouseLeave={() => handleHoverUI(false)}
+          />
           
-          <div className={`controls ${!showControls ? "controls-hidden" : ""}`}>
-            <button className="btn" onClick={(e) => { e.stopPropagation(); prevPager(); }}>
+          <div 
+            className={`controls ${!showControls ? "controls-hidden" : ""}`} 
+            style={{ pointerEvents: showControls ? 'auto' : 'none' }}
+            onMouseEnter={() => handleHoverUI(true)}
+            onMouseLeave={() => handleHoverUI(false)}
+          >
+            <button className="btn" onClick={(e) => { 
+              e.stopPropagation(); 
+              const rect = e.currentTarget.getBoundingClientRect();
+              actionRef.current?.('prev', rect.left + rect.width / 2, rect.top + rect.height / 2);
+            }}>
               Previous
             </button>
-            <button className="btn" onClick={(e) => { e.stopPropagation(); nextPager(); }}>
+            <button className="btn" onClick={(e) => { 
+              e.stopPropagation(); 
+              const rect = e.currentTarget.getBoundingClientRect();
+              actionRef.current?.('next', rect.left + rect.width / 2, rect.top + rect.height / 2);
+            }}>
               Next
             </button>
           </div>

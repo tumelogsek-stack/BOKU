@@ -7,11 +7,12 @@ import { processBook } from '../lib/book-utils';
 
 interface LibraryProps {
   onOpenBook: (bookId: string) => void;
+  onOpenHighlights: () => void;
 }
 
 type SortOption = 'lastRead' | 'title' | 'author' | 'progress';
 
-export default function Library({ onOpenBook }: LibraryProps) {
+export default function Library({ onOpenBook, onOpenHighlights }: LibraryProps) {
   const [books, setBooks] = useState<Book[]>([]);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [searchQuery, setSearchQuery] = useState('');
@@ -186,6 +187,14 @@ export default function Library({ onOpenBook }: LibraryProps) {
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
               </button>
             </div>
+
+            <button
+              onClick={onOpenHighlights}
+              className="flex items-center justify-center px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg cursor-pointer transition-colors"
+            >
+              <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" /></svg>
+              My Highlights
+            </button>
 
             <label className="flex items-center justify-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg cursor-pointer transition-colors">
               <span className="mr-2">Import Book</span>
