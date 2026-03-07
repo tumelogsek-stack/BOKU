@@ -648,17 +648,10 @@ foliate-view::part(filter) {
 /* ========== Highlights Page ========== */
 .highlights-page {
   min-height: 100vh;
-  background: #f7f7f8;
-  color: #1a1a2e;
+  background: #070b13;
+  color: #f3f4f6;
   font-family: "Inter", system-ui, -apple-system, sans-serif;
   padding: 2rem;
-}
-
-@media (prefers-color-scheme: dark) {
-  .highlights-page {
-    background: #0f0f17;
-    color: #e0e0e0;
-  }
 }
 
 .highlights-loading {
@@ -704,19 +697,11 @@ foliate-view::part(filter) {
   width: 40px;
   height: 40px;
   border-radius: 12px;
-  border: 1px solid rgba(0,0,0,0.08);
-  background: white;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: #1f2937;
   cursor: pointer;
   transition: all 0.2s;
-  color: #333;
-}
-
-@media (prefers-color-scheme: dark) {
-  .highlights-back-btn {
-    background: #1e1e2e;
-    border-color: rgba(255,255,255,0.08);
-    color: #e0e0e0;
-  }
+  color: #e5e7eb;
 }
 
 .highlights-back-btn:hover {
@@ -755,20 +740,12 @@ foliate-view::part(filter) {
   min-width: 200px;
   padding: 0.6rem 1rem;
   border-radius: 12px;
-  border: 1px solid rgba(0,0,0,0.1);
-  background: white;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: #1f2937;
   font-size: 0.9rem;
   outline: none;
   transition: border-color 0.2s;
-  color: #333;
-}
-
-@media (prefers-color-scheme: dark) {
-  .highlights-search {
-    background: #1e1e2e;
-    border-color: rgba(255,255,255,0.1);
-    color: #e0e0e0;
-  }
+  color: #f3f4f6;
 }
 
 .highlights-search:focus {
@@ -778,20 +755,12 @@ foliate-view::part(filter) {
 .highlights-select {
   padding: 0.6rem 1rem;
   border-radius: 12px;
-  border: 1px solid rgba(0,0,0,0.1);
-  background: white;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: #1f2937;
   font-size: 0.9rem;
   outline: none;
   cursor: pointer;
-  color: #333;
-}
-
-@media (prefers-color-scheme: dark) {
-  .highlights-select {
-    background: #1e1e2e;
-    border-color: rgba(255,255,255,0.1);
-    color: #e0e0e0;
-  }
+  color: #f3f4f6;
 }
 
 .highlights-color-filters {
@@ -901,32 +870,19 @@ foliate-view::part(filter) {
 .highlight-card {
   break-inside: avoid;
   margin-bottom: 1.25rem;
-  background: white;
+  background: #111827;
   border-radius: 16px;
   border-left: 4px solid #FFD700;
   padding: 1.25rem;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.04);
+  box-shadow: 0 4px 15px rgba(0,0,0,0.3);
   transition: transform 0.2s, box-shadow 0.2s;
   position: relative;
   animation: cardIn 0.4s ease backwards;
 }
 
-@media (prefers-color-scheme: dark) {
-  .highlight-card {
-    background: #1e1e2e;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.2);
-  }
-}
-
 .highlight-card:hover {
   transform: translateY(-3px);
-  box-shadow: 0 8px 30px rgba(0,0,0,0.08);
-}
-
-@media (prefers-color-scheme: dark) {
-  .highlight-card:hover {
-    box-shadow: 0 8px 30px rgba(0,0,0,0.35);
-  }
+  box-shadow: 0 8px 30px rgba(0,0,0,0.4);
 }
 
 @keyframes cardIn {
@@ -1135,6 +1091,7 @@ foliate-view::part(filter) {
   align-items: center;
   gap: 0.5rem;
   width: 100px;
+  min-height: 200px; /* Crucial: Ensures two-line titles don't cut off */
   background: none;
   border: none;
   cursor: pointer;
@@ -1204,6 +1161,7 @@ foliate-view::part(filter) {
   max-width: 100%;
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
   transition: color 0.2s, font-weight 0.2s;

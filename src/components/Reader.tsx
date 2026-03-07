@@ -20,7 +20,7 @@ export interface FoliateView extends HTMLElement {
     deleteAnnotation(annotation: unknown): Promise<unknown>;
     getCFI(index: number, range: Range): string;
 }
-import { getBook, updateProgress, saveHighlight, getHighlightsByBook, type Highlight } from "../lib/db";
+import { getBook, updateProgress, saveHighlight, getHighlightsByBook, deleteHighlight, updateHighlightNote, type Highlight } from "../lib/db";
 
 interface ReaderProps {
   bookId: string;
@@ -93,6 +93,7 @@ export default function Reader({ bookId, highlightCfi, onBack, onBackToHighlight
   const initialCfiRef = useRef<string | null>(null);
   const [touchFeedback, setTouchFeedback] = useState<{ x: number, y: number, type: 'prev' | 'next' | 'toggle' } | null>(null);
   const actionRef = useRef<((type: 'prev' | 'next' | 'toggle', x?: number, y?: number) => void) | null>(null);
+  const [highlights, setHighlights] = useState<Highlight[]>([]);
   const highlightsRef = useRef<Highlight[]>([]);
   const activeDocRef = useRef<Document | null>(null);
   const themeMenuRef = useRef<HTMLDivElement>(null);
@@ -106,8 +107,10 @@ export default function Reader({ bookId, highlightCfi, onBack, onBackToHighlight
   const originalFractionRef = useRef<number>(0);
   const lastUIToggleRef = useRef<number>(0);
   const currentFractionRef = useRef<number>(0);
+  const lastCfiRef = useRef<string | null>(null);
   const abortControllersRef = useRef<Map<Document, AbortController>>(new Map());
   const syncChannelRef = useRef<BroadcastChannel | null>(null);
+  const [tocTab, setTocTab] = useState<'contents' | 'highlights'>('contents');
   const highlightToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Synchronous ref sync helper
@@ -140,6 +143,38 @@ export default function Reader({ bookId, highlightCfi, onBack, onBackToHighlight
     cfi: string;
   } | null>(null);
   const [highlightToast, setHighlightToast] = useState(false);
+  const penTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Note modal state: shown after picking a color
+  const [noteModal, setNoteModal] = useState<{
+    id?: string; // If set, we are editing existing. Otherwise creating.
+    text: string;
+    cfi: string;
+    color: string;
+  } | null>(null);
+  const [noteInput, setNoteInput] = useState('');
+  // Pending note state: shows a pen emoji after highlighting
+  const [pendingNoteHighlight, setPendingNoteHighlight] = useState<{
+    id: string;
+    x: number;
+    y: number;
+    text: string;
+    cfi: string;
+    color: string;
+  } | null>(null);
+  
+  const highlightToolbarRef = useRef(highlightToolbar);
+  const pendingNoteHighlightRef = useRef(pendingNoteHighlight);
+  
+  useEffect(() => {
+    highlightToolbarRef.current = highlightToolbar;
+  }, [highlightToolbar]);
+  
+  useEffect(() => {
+    pendingNoteHighlightRef.current = pendingNoteHighlight;
+  }, [pendingNoteHighlight]);
+  // Editing a note on an existing highlight
+  const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
+  const [editingNoteText, setEditingNoteText] = useState('');
   const selectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const animatingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const uiTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -230,7 +265,7 @@ export default function Reader({ bookId, highlightCfi, onBack, onBackToHighlight
           if (highlightCfi) {
             if (book.progressCfi) {
               updateOriginalCfi(book.progressCfi);
-              originalFractionRef.current = book.progressFraction ?? 0;
+              originalFractionRef.current = book.progressPercentage ?? 0;
             }
             initialCfiRef.current = highlightCfi;
           } else if (book.progressCfi) {
@@ -245,6 +280,7 @@ export default function Reader({ bookId, highlightCfi, onBack, onBackToHighlight
   useEffect(() => {
     if (bookId) {
       const load = () => getHighlightsByBook(bookId).then(h => {
+        setHighlights(h);
         highlightsRef.current = h;
       });
       load();
@@ -485,6 +521,7 @@ export default function Reader({ bookId, highlightCfi, onBack, onBackToHighlight
         viewer.addEventListener("relocate", ((e: Event) => {
           const detail = (e as CustomEvent).detail;
           currentFractionRef.current = detail.fraction;
+          lastCfiRef.current = detail.cfi;
           if (bookId && originalCfiRef.current === null) {
             // Save progress only when not previewing a highlight
             updateProgress(bookId, detail.cfi, detail.fraction);
@@ -602,12 +639,28 @@ export default function Reader({ bookId, highlightCfi, onBack, onBackToHighlight
             const dy = ev.clientY - start.y;
             const distance = Math.sqrt(dx*dx + dy*dy);
             
-            // Threshold: 5px movement to distinguish click from drag/selection
+            // 5px movement to distinguish click from drag/selection
             if (distance > 5) return;
 
             const target = ev.target as HTMLElement;
             // Ignore if clicked on a link
             if (target.closest('a')) return;
+            
+            // NAVIGATION SUPPRESSION
+            // If toolbar, pen icon, or active selection exists, consume this click to clear them
+            const selection = doc.getSelection();
+            const hasSelection = selection && !selection.isCollapsed && selection.toString().trim().length > 0;
+            if (highlightToolbarRef.current || pendingNoteHighlightRef.current || hasSelection) {
+              if (highlightToolbarRef.current) setHighlightToolbar(null);
+              if (pendingNoteHighlightRef.current) setPendingNoteHighlight(null);
+              if (hasSelection) {
+                try {
+                  doc.getSelection()?.removeAllRanges();
+                } catch { /* ignore */ }
+              }
+              // Prevent navigation zones from triggering
+              return;
+            }
 
             // Translate iframe-local X to outer window X for accurate zone detection
             // and correct visual feedback positioning
@@ -633,6 +686,10 @@ export default function Reader({ bookId, highlightCfi, onBack, onBackToHighlight
               ev.preventDefault(); // Prevent ghost clicks
               actionRef.current?.('toggle', outerX, outerY);
             }
+          }, { signal });
+
+          doc.addEventListener("mousedown", () => {
+             if (pendingNoteHighlightRef.current) setPendingNoteHighlight(null);
           }, { signal });
 
           // Cleanup listeners when viewer emits a "unload" or "load" again
@@ -764,10 +821,31 @@ export default function Reader({ bookId, highlightCfi, onBack, onBackToHighlight
     if (isThemeOpen || isTextMenuOpen) {
       document.addEventListener("mousedown", handleClickOutside);
     }
+    
+    const handleGlobalClick = () => {
+        if (pendingNoteHighlight) setPendingNoteHighlight(null);
+    };
+    document.addEventListener("mousedown", handleGlobalClick);
+
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("mousedown", handleGlobalClick);
     };
-  }, [isThemeOpen, isTextMenuOpen]);
+  }, [isThemeOpen, isTextMenuOpen, pendingNoteHighlight]);
+
+  // Auto-dismiss pen emoji after 3 seconds
+  useEffect(() => {
+    if (penTimeoutRef.current) clearTimeout(penTimeoutRef.current);
+    if (pendingNoteHighlight) {
+      penTimeoutRef.current = setTimeout(() => {
+        setPendingNoteHighlight(null);
+        penTimeoutRef.current = null;
+      }, 3000);
+    }
+    return () => {
+      if (penTimeoutRef.current) clearTimeout(penTimeoutRef.current);
+    };
+  }, [pendingNoteHighlight]);
 
   const goToChapter = (href: string) => {
     const viewer = viewerRef.current?.querySelector("foliate-view");
@@ -877,12 +955,301 @@ export default function Reader({ bookId, highlightCfi, onBack, onBackToHighlight
           box-shadow: -10px 0 30px rgba(0, 0, 0, 0.1); /* Shadow to left */
           display: flex;
           flex-direction: column;
+          display: flex;
+          flex-direction: column;
           animation: slideInRight 0.3s cubic-bezier(0.16, 1, 0.3, 1);
         }
 
+        .tocTabs {
+          display: flex;
+          gap: 1rem;
+          padding: 0 1.5rem;
+          margin-bottom: 0.5rem;
+        }
+
+        .tocTabBtn {
+          background: none;
+          border: none;
+          color: inherit;
+          padding: 0.5rem 0.25rem;
+          font-size: 0.9rem;
+          font-weight: 500;
+          cursor: pointer;
+          opacity: 0.6;
+          transition: all 0.2s ease;
+          position: relative;
+        }
+
+        .tocTabBtn.active {
+          opacity: 1;
+          color: var(--accent-color);
+        }
+
+        .tocTabBtn.active::after {
+          content: "";
+          position: absolute;
+          bottom: 0;
+          left: 0;
+          width: 100%;
+          height: 2px;
+          background: var(--accent-color);
+          border-radius: 2px;
+        }
+
         .tocHeader {
-          padding: 2rem 1.5rem;
-          border-bottom: 1px solid var(--glass-border);
+          padding: 1.5rem 1.5rem 1rem;
+        }
+
+        .highlightsList {
+          flex: 1;
+          overflow-y: auto;
+          display: flex;
+          flex-direction: column;
+          gap: 0.75rem;
+          padding: 1rem 1.5rem;
+        }
+
+        .highlightItem {
+          background: rgba(0, 0, 0, 0.05);
+          border-radius: 12px;
+          padding: 1rem;
+          display: flex;
+          flex-direction: column;
+          gap: 0.5rem;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          border: 1px solid transparent;
+          position: relative;
+        }
+
+        .highlightItem:hover {
+          background: rgba(0, 0, 0, 0.08);
+          border-color: var(--glass-border);
+        }
+
+        .highlightItem-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 0.5rem;
+        }
+
+        .highlightItem-chapter {
+          font-size: 0.75rem;
+          font-weight: 600;
+          opacity: 0.7;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+        }
+
+        .highlightItem-text {
+          font-size: 0.9rem;
+          line-height: 1.5;
+          font-style: italic;
+          display: -webkit-box;
+          -webkit-line-clamp: 3;
+          line-clamp: 3;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+
+        .highlightItem-footer {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-top: 0.25rem;
+        }
+
+        .highlightItem-date {
+          font-size: 0.75rem;
+          opacity: 0.5;
+        }
+
+        .btnDeleteHighlight {
+          padding: 4px;
+          opacity: 0.3;
+          transition: opacity 0.2s;
+          background: none;
+          border: none;
+          cursor: pointer;
+          color: inherit;
+        }
+
+        .highlightItem:hover .btnDeleteHighlight {
+          opacity: 0.8;
+        }
+
+        .btnDeleteHighlight:hover {
+          color: #ff4757;
+          opacity: 1 !important;
+        }
+
+        .btnPen {
+          position: fixed;
+          background: var(--panel-bg);
+          border: 1px solid var(--glass-border);
+          border-radius: 50%;
+          width: 44px;
+          height: 44px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 1.2rem;
+          cursor: pointer;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+          z-index: 1001;
+          animation: popIn 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+          transition: transform 0.2s;
+        }
+
+        .btnPen:hover {
+          transform: scale(1.1);
+        }
+
+        @keyframes popIn {
+          from { transform: scale(0); opacity: 0; }
+          to { transform: scale(1); opacity: 1; }
+        }
+
+        .noteModal {
+          position: fixed;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          background: var(--panel-bg);
+          border: 1px solid var(--glass-border);
+          border-radius: 16px;
+          padding: 1.5rem;
+          z-index: 2000;
+          width: 340px;
+          max-width: 90vw;
+          box-shadow: 0 16px 48px rgba(0,0,0,0.2);
+          display: flex;
+          flex-direction: column;
+          gap: 1rem;
+          animation: fadeIn 0.2s ease;
+        }
+
+        .noteModal-backdrop {
+          position: fixed;
+          inset: 0;
+          background: rgba(0,0,0,0.3);
+          z-index: 1999;
+          animation: fadeIn 0.2s ease;
+        }
+
+        .noteModal-preview {
+          font-style: italic;
+          font-size: 0.85rem;
+          opacity: 0.7;
+          max-height: 60px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          display: -webkit-box;
+          -webkit-line-clamp: 3;
+          -webkit-box-orient: vertical;
+        }
+
+        .noteModal textarea {
+          width: 100%;
+          min-height: 80px;
+          padding: 0.75rem;
+          border: 1px solid var(--glass-border);
+          border-radius: 8px;
+          background: rgba(0,0,0,0.03);
+          color: inherit;
+          font-family: inherit;
+          font-size: 0.9rem;
+          resize: vertical;
+          outline: none;
+        }
+
+        .noteModal textarea:focus {
+          border-color: var(--accent-color);
+        }
+
+        .noteModal-actions {
+          display: flex;
+          gap: 0.5rem;
+          justify-content: flex-end;
+        }
+
+        .highlightItem-note {
+          font-size: 0.8rem;
+          opacity: 0.7;
+          padding: 0.5rem 0.75rem;
+          background: rgba(0,0,0,0.03);
+          border-radius: 8px;
+          line-height: 1.4;
+          white-space: pre-wrap;
+        }
+
+        .highlightItem-noteActions {
+          display: flex;
+          gap: 0.25rem;
+          align-items: center;
+        }
+
+        .btnEditNote {
+          padding: 4px;
+          opacity: 0.3;
+          transition: opacity 0.2s;
+          background: none;
+          border: none;
+          cursor: pointer;
+          color: inherit;
+          font-size: 0.75rem;
+        }
+
+        .highlightItem:hover .btnEditNote {
+          opacity: 0.7;
+        }
+
+        .btnEditNote:hover {
+          opacity: 1 !important;
+          color: var(--accent-color);
+        }
+
+        .editNoteInline {
+          display: flex;
+          flex-direction: column;
+          gap: 0.5rem;
+        }
+
+        .editNoteInline textarea {
+          width: 100%;
+          min-height: 60px;
+          padding: 0.5rem;
+          border: 1px solid var(--glass-border);
+          border-radius: 6px;
+          background: rgba(0,0,0,0.03);
+          color: inherit;
+          font-family: inherit;
+          font-size: 0.8rem;
+          resize: vertical;
+          outline: none;
+        }
+
+        .editNoteInline textarea:focus {
+          border-color: var(--accent-color);
+        }
+
+        .editNoteInline-actions {
+          display: flex;
+          gap: 0.25rem;
+          justify-content: flex-end;
+        }
+
+        .emptyState {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          height: 100%;
+          opacity: 0.5;
+          text-align: center;
+          padding: 2rem;
+          gap: 0.5rem;
         }
 
         @keyframes slideInRight {
@@ -1103,33 +1470,146 @@ export default function Reader({ bookId, highlightCfi, onBack, onBackToHighlight
         <div className="tocOverlay" onClick={() => setIsMenuOpen(false)}>
           <div className="tocMenu" onClick={(e) => e.stopPropagation()}>
             <div className="tocHeader">
-              <h3>Table of Contents</h3>
+              <h3>Navigation</h3>
             </div>
-            <div className="tocList">
-              {toc.map((item, index) => (
-                <div key={index} className="tocItem">
-                  <button 
-                    className={`tocLink ${currentChapter === item.label ? "active" : ""}`} 
-                    onClick={() => item.href && goToChapter(item.href)}
-                  >
-                    {item.label}
-                  </button>
-                  {item.subitems && item.subitems.length > 0 && (
-                    <div className="tocSublist">
-                      {item.subitems.map((sub: TOCItem, subIndex: number) => (
+            <div className="tocTabs">
+              <button 
+                className={`tocTabBtn ${tocTab === 'contents' ? 'active' : ''}`}
+                onClick={() => setTocTab('contents')}
+              >
+                Contents
+              </button>
+              <button 
+                className={`tocTabBtn ${tocTab === 'highlights' ? 'active' : ''}`}
+                onClick={() => setTocTab('highlights')}
+              >
+                Highlights
+              </button>
+            </div>
+
+            {tocTab === 'contents' ? (
+              <div className="tocList">
+                {toc.map((item, index) => (
+                  <div key={index} className="tocItem">
+                    <button 
+                      className={`tocLink ${currentChapter === item.label ? "active" : ""}`} 
+                      onClick={() => item.href && goToChapter(item.href)}
+                    >
+                      {item.label}
+                    </button>
+                    {item.subitems && item.subitems.length > 0 && (
+                      <div className="tocSublist">
+                        {item.subitems.map((sub: TOCItem, subIndex: number) => (
+                          <button 
+                            key={subIndex} 
+                            className={`tocLink tocSublink ${currentChapter === sub.label ? "active" : ""}`} 
+                            onClick={() => sub.href && goToChapter(sub.href)}
+                          >
+                            {sub.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="highlightsList">
+                {highlights.length === 0 ? (
+                  <div className="emptyState">
+                    <svg className="w-8 h-8 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+                    <p>No highlights yet</p>
+                  </div>
+                ) : (
+                  highlights
+                    .slice()
+                    .sort((a, b) => b.createdAt - a.createdAt)
+                    .map((h) => (
+                    <div key={h.id} className="highlightItem" onClick={() => {
+                      const v = viewerRef.current?.querySelector("foliate-view") as FoliateView | null;
+                      if (v && h.cfi) {
+                        // Capture current position if not already in preview mode
+                        if (originalCfiRef.current === null && lastCfiRef.current) {
+                          updateOriginalCfi(lastCfiRef.current);
+                          originalFractionRef.current = currentFractionRef.current;
+                        }
+                        v.goTo(h.cfi);
+                        setIsMenuOpen(false);
+                      }
+                    }}>
+                      <div className="highlightItem-header">
+                        <span className="highlightItem-chapter" style={{ color: h.color }}>
+                          {h.chapter || "Untitled Chapter"}
+                        </span>
                         <button 
-                          key={subIndex} 
-                          className={`tocLink tocSublink ${currentChapter === sub.label ? "active" : ""}`} 
-                          onClick={() => sub.href && goToChapter(sub.href)}
+                          className="btnDeleteHighlight"
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            if (confirm("Delete this highlight?")) {
+                              await deleteHighlight(h.id);
+                              // Sync
+                              if (syncChannelRef.current) {
+                                syncChannelRef.current.postMessage({ type: 'REFRESH_HIGHLIGHTS', bookId });
+                              }
+                              // Update state and ref
+                              setHighlights(prev => prev.filter(item => item.id !== h.id));
+                              highlightsRef.current = highlightsRef.current.filter(item => item.id !== h.id);
+                            }
+                          }}
                         >
-                          {sub.label}
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
                         </button>
-                      ))}
+                      </div>
+                      <p className="highlightItem-text" style={{ borderLeft: `3px solid ${h.color}`, paddingLeft: '8px' }}>
+                        {h.text}
+                      </p>
+                      {editingNoteId === h.id ? (
+                        <div className="editNoteInline" onClick={(e) => e.stopPropagation()}>
+                          <textarea
+                            value={editingNoteText}
+                            onChange={(e) => setEditingNoteText(e.target.value)}
+                            placeholder="Add a note..."
+                            autoFocus
+                          />
+                          <div className="editNoteInline-actions">
+                            <button className="btn" style={{ fontSize: '0.75rem', padding: '4px 10px' }} onClick={() => setEditingNoteId(null)}>Cancel</button>
+                            <button className="btn" style={{ fontSize: '0.75rem', padding: '4px 10px', background: 'var(--accent-color)', color: 'white' }} onClick={async () => {
+                              await updateHighlightNote(h.id, editingNoteText);
+                              setHighlights(prev => prev.map(item => item.id === h.id ? { ...item, note: editingNoteText } : item));
+                              highlightsRef.current = highlightsRef.current.map(item => item.id === h.id ? { ...item, note: editingNoteText } : item);
+                              if (syncChannelRef.current) {
+                                syncChannelRef.current.postMessage({ type: 'REFRESH_HIGHLIGHTS', bookId });
+                              }
+                              setEditingNoteId(null);
+                            }}>Save</button>
+                          </div>
+                        </div>
+                      ) : (
+                        h.note ? (
+                          <div className="highlightItem-note" onClick={(e) => e.stopPropagation()}>
+                            📝 {h.note}
+                          </div>
+                        ) : null
+                      )}
+                      <div className="highlightItem-footer">
+                        <span className="highlightItem-date">
+                          {new Date(h.createdAt).toLocaleDateString()}
+                        </span>
+                        <div className="highlightItem-noteActions">
+                          <button className="btnEditNote" onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingNoteId(h.id);
+                            setEditingNoteText(h.note || '');
+                          }} title={h.note ? 'Edit note' : 'Add note'}>
+                            {h.note ? '✏️ Edit' : '📝 Add note'}
+                          </button>
+                        </div>
+                      </div>
                     </div>
-                  )}
-                </div>
-              ))}
-            </div>
+                  ))
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1186,45 +1666,53 @@ export default function Reader({ bookId, highlightCfi, onBack, onBackToHighlight
               title={c.label}
               onClick={async (e) => {
                 e.stopPropagation();
-                const cfi = highlightToolbar.cfi;
+                
                 const highlightData = {
-                  bookId,
-                  text: highlightToolbar.text,
-                  cfi: cfi,
-                  color: c.color,
-                  chapter: currentChapter || undefined,
-                  bookTitle: metadata?.title,
-                  bookAuthor: metadata?.author,
+                    bookId,
+                    text: highlightToolbar.text,
+                    cfi: highlightToolbar.cfi,
+                    color: c.color,
+                    chapter: currentChapter || undefined,
+                    bookTitle: metadata?.title,
+                    bookAuthor: metadata?.author,
                 };
 
                 const newId = await saveHighlight(highlightData);
                 
-                // Sync across instances using persistent channel
                 if (syncChannelRef.current) {
                     syncChannelRef.current.postMessage({ type: 'REFRESH_HIGHLIGHTS', bookId });
                 }
                 
-                // Update local ref so it persists during navigation
-                highlightsRef.current.push({
-                  ...highlightData,
-                  id: newId,
-                  createdAt: Date.now()
-                });
+                const newHighlight = {
+                    ...highlightData,
+                    id: newId,
+                    createdAt: Date.now()
+                };
+
+                setHighlights(prev => [...prev, newHighlight]);
+                highlightsRef.current = [...highlightsRef.current, newHighlight];
                 
-                // Immediately render the highlight in the viewer
                 const v = viewerRef.current?.querySelector("foliate-view") as FoliateView | null;
                 if (v) {
-                    v.addAnnotation({ value: cfi, color: c.color });
+                    v.addAnnotation({ value: highlightToolbar.cfi, color: c.color });
                 }
+
+                // Show pen emoji at the same spot
+                setPendingNoteHighlight({
+                    id: newId,
+                    x: highlightToolbar.x,
+                    y: highlightToolbar.y,
+                    text: highlightToolbar.text,
+                    cfi: highlightToolbar.cfi,
+                    color: c.color
+                });
 
                 setHighlightToolbar(null);
                 
-                // Clear selection in the active document
                 try {
                   activeDocRef.current?.getSelection()?.removeAllRanges();
                 } catch { /* ignore */ }
                 
-                // Show toast
                 setHighlightToast(true);
                 if (highlightToastTimerRef.current) clearTimeout(highlightToastTimerRef.current);
                 highlightToastTimerRef.current = setTimeout(() => {
@@ -1235,6 +1723,76 @@ export default function Reader({ bookId, highlightCfi, onBack, onBackToHighlight
             />
           ))}
         </div>
+      )}
+
+      {/* Note Modal */}
+      {noteModal && (
+        <>
+          <div className="noteModal-backdrop" onClick={() => setNoteModal(null)} />
+          <div className="noteModal">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <span style={{ width: 14, height: 14, borderRadius: '50%', background: noteModal.color, flexShrink: 0 }} />
+              <strong style={{ fontSize: '0.95rem' }}>{noteModal.id ? 'Edit Note' : 'Add a Note'}</strong>
+            </div>
+            <p className="noteModal-preview">&ldquo;{noteModal.text}&rdquo;</p>
+            <textarea
+              value={noteInput}
+              onChange={(e) => setNoteInput(e.target.value)}
+              placeholder="Write a note (optional)..."
+              autoFocus
+            />
+            <div className="noteModal-actions">
+              <button className="btn" style={{ fontSize: '0.85rem', padding: '6px 14px' }} onClick={() => setNoteModal(null)}>Cancel</button>
+              <button className="btn" style={{ fontSize: '0.85rem', padding: '6px 14px', background: 'var(--accent-color)', color: 'white' }} onClick={async () => {
+                const targetId = noteModal.id || (pendingNoteHighlight?.id);
+                if (!targetId) return;
+
+                await updateHighlightNote(targetId, noteInput.trim());
+                
+                if (syncChannelRef.current) {
+                    syncChannelRef.current.postMessage({ type: 'REFRESH_HIGHLIGHTS', bookId });
+                }
+                
+                setHighlights(prev => prev.map(h => h.id === targetId ? { ...h, note: noteInput.trim() || undefined } : h));
+                highlightsRef.current = highlightsRef.current.map(h => h.id === targetId ? { ...h, note: noteInput.trim() || undefined } : h);
+
+                setNoteModal(null);
+                setPendingNoteHighlight(null);
+                
+                setHighlightToast(true);
+                if (highlightToastTimerRef.current) clearTimeout(highlightToastTimerRef.current);
+                highlightToastTimerRef.current = setTimeout(() => {
+                    setHighlightToast(false);
+                    highlightToastTimerRef.current = null;
+                }, 2000);
+              }}>Save</button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Pending Note Pen Button */}
+      {pendingNoteHighlight && (
+        <button
+          className="btnPen"
+          style={{
+            left: pendingNoteHighlight.x - 22,
+            top: pendingNoteHighlight.y - 44,
+          }}
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            setNoteModal({
+              id: pendingNoteHighlight.id,
+              text: pendingNoteHighlight.text,
+              cfi: pendingNoteHighlight.cfi,
+              color: pendingNoteHighlight.color
+            });
+            setNoteInput('');
+            setPendingNoteHighlight(null);
+          }}
+        >
+          ✏️
+        </button>
       )}
 
       {/* Highlight Toast */}

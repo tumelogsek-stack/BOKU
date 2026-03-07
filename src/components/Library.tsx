@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useState, useMemo, useCallback } from 'react';
+import Image from 'next/image';
 import { Book, getAllBooks, saveBook, deleteBook } from '../lib/db';
 import { processBook } from '../lib/book-utils';
 
@@ -20,6 +21,7 @@ export default function Library({ onOpenBook, onOpenHighlights }: LibraryProps) 
   const [isLoading, setIsLoading] = useState(true);
   const [isImporting, setIsImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   const loadBooks = useCallback(async () => {
     try {
@@ -123,11 +125,21 @@ export default function Library({ onOpenBook, onOpenHighlights }: LibraryProps) 
     }, [book.metadata.cover]);
 
     if (url) {
-      return <img src={url} alt={book.metadata.title} className="w-full h-full object-cover" />;
+      return (
+        <div className="relative w-full h-full">
+          <Image 
+            src={url} 
+            alt={book.metadata.title || 'Book Cover'} 
+            fill
+            className="object-cover rounded-xl"
+            unoptimized
+          />
+        </div>
+      );
     }
 
     return (
-      <div className="w-full h-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center text-gray-400 dark:text-gray-500">
+      <div className="w-full h-full bg-gray-800 flex items-center justify-center text-gray-500">
         <span className="text-4xl">📚</span>
       </div>
     );
@@ -142,7 +154,7 @@ export default function Library({ onOpenBook, onOpenHighlights }: LibraryProps) 
   }
 
   return (
-    <div className="h-screen overflow-y-auto bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 p-6">
+    <div className="h-screen overflow-y-auto bg-[#070b13] text-gray-100 p-6">
       <header className="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold text-gray-800 dark:text-white mb-2">My Library</h1>
@@ -151,41 +163,71 @@ export default function Library({ onOpenBook, onOpenHighlights }: LibraryProps) 
           </p>
         </div>
 
-        <div className="flex flex-col sm:flex-row gap-3">
-            <input 
-              type="text" 
-              placeholder="Search library..." 
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:ring-2 focus:ring-blue-500 outline-none"
-            />
-            
-            <select 
-              value={sortBy} 
-              onChange={(e) => setSortBy(e.target.value as SortOption)}
-              className="px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:ring-2 focus:ring-blue-500 outline-none"
-            >
-              <option value="lastRead">Recent</option>
-              <option value="title">Title</option>
-              <option value="author">Author</option>
-              <option value="progress">Progress</option>
-            </select>
+        <div className="flex flex-col sm:flex-row gap-3 relative">
+            <div className="relative">
+              <button 
+                onClick={() => setIsSettingsOpen(!isSettingsOpen)}
+                className="flex items-center justify-center p-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                aria-label="Library Settings"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+                </svg>
+              </button>
 
-            <div className="flex bg-gray-200 dark:bg-gray-700 rounded-lg p-1">
-              <button 
-                onClick={() => setViewMode('grid')}
-                className={`p-2 rounded ${viewMode === 'grid' ? 'bg-white dark:bg-gray-600 shadow' : 'text-gray-500 dark:text-gray-400'}`}
-                aria-label="Grid View"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" /></svg>
-              </button>
-              <button 
-                onClick={() => setViewMode('list')}
-                className={`p-2 rounded ${viewMode === 'list' ? 'bg-white dark:bg-gray-600 shadow' : 'text-gray-500 dark:text-gray-400'}`}
-                aria-label="List View"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
-              </button>
+              {isSettingsOpen && (
+                <div className="absolute top-full mt-2 right-0 sm:left-0 sm:right-auto w-72 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-xl z-50 p-4 flex flex-col gap-4">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Search</label>
+                    <input 
+                      type="text" 
+                      placeholder="Title or author..." 
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 focus:ring-2 focus:ring-blue-500 outline-none text-sm"
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Sort By</label>
+                    <select 
+                      value={sortBy} 
+                      onChange={(e) => setSortBy(e.target.value as SortOption)}
+                      className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 focus:ring-2 focus:ring-blue-500 outline-none text-sm"
+                    >
+                      <option value="lastRead">Recent</option>
+                      <option value="title">Title</option>
+                      <option value="author">Author</option>
+                      <option value="progress">Progress</option>
+                    </select>
+                  </div>
+
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">View Mode</label>
+                    <div className="flex bg-gray-100 dark:bg-gray-700 rounded-lg p-1 w-full relative">
+                      {/* Animated slide background */}
+                      <div 
+                        className="absolute top-1 bottom-1 w-[calc(50%-4px)] bg-white dark:bg-gray-600 rounded shadow-sm transition-all duration-300 ease-in-out"
+                        style={{ left: viewMode === 'grid' ? '4px' : 'calc(50%)' }}
+                      />
+                      <button 
+                        onClick={() => setViewMode('grid')}
+                        className={`flex-1 flex justify-center items-center py-1.5 rounded relative z-10 transition-colors ${viewMode === 'grid' ? 'text-blue-600 dark:text-blue-400' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
+                        aria-label="Grid View"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" /></svg>
+                      </button>
+                      <button 
+                        onClick={() => setViewMode('list')}
+                        className={`flex-1 flex justify-center items-center py-1.5 rounded relative z-10 transition-colors ${viewMode === 'list' ? 'text-blue-600 dark:text-blue-400' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
+                        aria-label="List View"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <button
@@ -253,10 +295,12 @@ export default function Library({ onOpenBook, onOpenHighlights }: LibraryProps) 
             <div 
               key={book.id}
               onClick={() => onOpenBook(book.id)}
-              className={`group bg-white dark:bg-gray-800 rounded-xl shadow-sm hover:shadow-md transition-all cursor-pointer border border-gray-100 dark:border-gray-700 overflow-hidden relative
-                ${viewMode === 'list' ? 'flex flex-row h-32' : 'flex flex-col h-full'}
+              className={`group bg-[#070b13] rounded-xl shadow-2xl hover:shadow-purple-500/10 transition-all cursor-pointer overflow-hidden relative
+                ${viewMode === 'list' ? 'flex flex-row h-32' : 'flex flex-col'}
               `}
+              style={{ boxShadow: '0 0 0 5px #070b13, var(--tw-shadow, 0 0 #0000)' }}
             >
+              <div className="absolute inset-0 rounded-xl ring-1 ring-inset ring-[#070b13] pointer-events-none z-20"></div>
               <button 
                 onClick={(e) => handleDelete(e, book.id)}
                 className="absolute top-2 right-2 p-1.5 bg-black/50 hover:bg-red-500 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity z-10"
@@ -265,32 +309,42 @@ export default function Library({ onOpenBook, onOpenHighlights }: LibraryProps) 
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
               </button>
 
-              <div className={viewMode === 'grid' ? "aspect-[2/3] w-full relative" : "aspect-[2/3] h-full relative"}>
+              <div className={`relative ${viewMode === 'grid' ? 'aspect-[2/3] w-full' : 'aspect-[2/3] h-full'}`}>
                  <CoverImage book={book} />
-                 <div className="absolute bottom-0 left-0 right-0 h-1 bg-gray-200 dark:bg-gray-700">
-                   <div 
-                     className="h-full bg-green-500" 
-                     style={{ width: `${(book.progressPercentage || 0) * 100}%` }}
-                   />
-                 </div>
-              </div>
 
-              <div className="p-4 flex-1 flex flex-col justify-between">
-                <div>
-                  <h3 className="font-semibold text-gray-900 dark:text-gray-100 line-clamp-2 mb-1" title={book.metadata.title}>
-                    {book.metadata.title || "Untitled"}
-                  </h3>
-                  <p className="text-sm text-gray-500 dark:text-gray-400 line-clamp-1">
-                    {book.metadata.author || "Unknown Author"}
-                  </p>
-                </div>
-                
-                <div className="mt-4 flex items-center justify-between text-xs text-gray-400">
-                  <span>{Math.round((book.progressPercentage || 0) * 100)}% read</span>
-                  {viewMode === 'list' && (
-                    <span>Last opened: {new Date(book.lastReadAt).toLocaleDateString()}</span>
-                  )}
-                </div>
+                 {/* Gradient overlay – covers bottom 30% of the cover */}
+                 <div className="absolute bottom-0 left-[-1px] right-[-1px] flex flex-col justify-end p-3 pt-8"
+                   style={{ 
+                     //height: '25%', 
+                     background: 'linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.55) 60%, transparent 100%)',
+                     backdropFilter: 'blur(4px)',
+                     WebkitBackdropFilter: 'blur(4px)',
+                     maskImage: 'linear-gradient(to bottom, transparent 5%, black 20%)',
+                     WebkitMaskImage: 'linear-gradient(to bottom, transparent 5%, black 20%)'
+                   }}
+                 >
+                   <h3 className="font-semibold text-white text-sm leading-tight line-clamp-2 drop-shadow-md" title={book.metadata.title}>
+                     {book.metadata.title || "Untitled"}
+                   </h3>
+                   <p className="text-xs text-gray-300 line-clamp-1 mt-0.5 drop-shadow-md">
+                     {book.metadata.author || "Unknown Author"}
+                   </p>
+
+                   <div className="flex items-center justify-between text-[10px] text-gray-400 mt-1.5">
+                     <span>{Math.round((book.progressPercentage || 0) * 100)}% read</span>
+                     {viewMode === 'list' && (
+                       <span>Last opened: {new Date(book.lastReadAt).toLocaleDateString()}</span>
+                     )}
+                   </div>
+
+                   {/* Progress bar */}
+                   <div className="w-full h-1 bg-white/20 rounded-full mt-1.5 overflow-hidden">
+                     <div 
+                       className="h-full bg-green-400 rounded-full transition-all" 
+                       style={{ width: `${(book.progressPercentage || 0) * 100}%` }}
+                     />
+                   </div>
+                 </div>
               </div>
             </div>
           ))}

@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useState, useMemo, useCallback } from 'react';
+import Image from 'next/image';
 import { Highlight, getAllHighlights, deleteHighlight, getAllBooks, Book } from '../lib/db';
 
 interface HighlightsProps {
@@ -98,12 +99,24 @@ export default function Highlights({ onBack, onOpenBook }: HighlightsProps) {
     }, [book.metadata.cover]);
 
     if (url) {
-      return <img src={url} alt={book.metadata.title} className="book-cover-img" />;
+      return (
+        <div className="relative rounded-xl overflow-hidden shrink-0" style={{ width: 100, height: 150 }}>
+           <Image 
+             src={url} 
+             alt={book.metadata.title || 'Book Cover'} 
+             fill
+             className="object-cover rounded-xl"
+             unoptimized
+           />
+           <div className="absolute inset-0 rounded-xl ring-1 ring-inset ring-[#070b13] pointer-events-none z-20"></div>
+        </div>
+      );
     }
 
     return (
-      <div className="book-cover-placeholder">
+      <div className="book-cover-placeholder rounded-xl relative overflow-hidden shrink-0">
         <span>📚</span>
+        <div className="absolute inset-0 rounded-xl ring-1 ring-inset ring-[#070b13] pointer-events-none z-20"></div>
       </div>
     );
   };

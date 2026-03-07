@@ -1,7 +1,7 @@
 
 import { openDB, DBSchema } from 'idb';
 
-export interface DBBook {
+export interface Book {
   id: string; // unique ID based on book title + author or hash
   file: File;
   metadata: {
@@ -13,7 +13,7 @@ export interface DBBook {
   addedAt: number;
   lastReadAt: number;
   progressCfi?: string;
-  progressFraction: number;
+  progressPercentage: number;
 }
 
 export interface Highlight {
@@ -32,7 +32,7 @@ export interface Highlight {
 interface BookstoreDB extends DBSchema {
   books: {
     key: string;
-    value: DBBook;
+    value: Book;
     indexes: { 'by-last-read': number };
   };
   highlights: {
@@ -74,14 +74,14 @@ export async function saveBook(file: File, metadata: { title?: string; author?: 
   
   const existing = await db.get('books', id);
   
-  const book: DBBook = {
+  const book: Book = {
     id,
     file,
     metadata,
     addedAt: existing?.addedAt || Date.now(),
     lastReadAt: Date.now(),
     progressCfi: existing?.progressCfi,
-    progressFraction: existing?.progressFraction || 0,
+    progressPercentage: existing?.progressPercentage || 0,
   };
   
   await db.put('books', book);
@@ -104,7 +104,7 @@ export async function updateProgress(id: string, cfi: string, fraction?: number)
   if (book) {
     book.progressCfi = cfi;
     if (fraction !== undefined) {
-      book.progressFraction = fraction;
+      book.progressPercentage = fraction;
     }
     book.lastReadAt = Date.now();
     await db.put('books', book);
@@ -144,4 +144,13 @@ export async function getAllHighlights(): Promise<Highlight[]> {
 export async function deleteHighlight(id: string): Promise<void> {
   const db = await initDB();
   await db.delete('highlights', id);
+}
+
+export async function updateHighlightNote(id: string, note: string): Promise<void> {
+  const db = await initDB();
+  const highlight = await db.get('highlights', id);
+  if (highlight) {
+    highlight.note = note;
+    await db.put('highlights', highlight);
+  }
 }
