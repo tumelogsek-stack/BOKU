@@ -1,9 +1,8 @@
-
 "use client";
 
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import Image from 'next/image';
-import { Book, getAllBooks, saveBook, deleteBook } from '../lib/db';
+import { Book, getAllBooks, saveBook, deleteBook, togglePinned, toggleFavourite } from '../lib/db';
 import { processBook } from '../lib/book-utils';
 
 interface LibraryProps {
@@ -75,6 +74,18 @@ export default function Library({ onOpenBook, onOpenHighlights }: LibraryProps) 
     }
   };
 
+  const handleTogglePinned = async (e: React.MouseEvent, bookId: string) => {
+    e.stopPropagation();
+    await togglePinned(bookId);
+    loadBooks();
+  };
+
+  const handleToggleFavourite = async (e: React.MouseEvent, bookId: string) => {
+    e.stopPropagation();
+    await toggleFavourite(bookId);
+    loadBooks();
+  };
+  
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (confirm("Are you sure you want to delete this book?")) {
@@ -154,7 +165,7 @@ export default function Library({ onOpenBook, onOpenHighlights }: LibraryProps) 
   }
 
   return (
-    <div className="h-screen overflow-y-auto bg-[#070b13] text-gray-100 p-6">
+    <div className="h-screen overflow-y-auto bg-[#070b13] text-gray-100 p-4 sm:p-6 pb-20 md:pb-6">
       <header className="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold text-gray-800 dark:text-white mb-2">My Library</h1>
@@ -243,7 +254,7 @@ export default function Library({ onOpenBook, onOpenHighlights }: LibraryProps) 
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
               <input 
                 type="file" 
-                accept=".epub,.mobi,.azw3" 
+                accept=".epub,.mobi,.azw3,.pdf" 
                 multiple 
                 className="hidden" 
                 onChange={handleFileUpload}
@@ -280,7 +291,7 @@ export default function Library({ onOpenBook, onOpenHighlights }: LibraryProps) 
             Import Book
             <input 
               type="file" 
-              accept=".epub" 
+              accept=".epub,.pdf" 
               className="hidden" 
               onChange={handleFileUpload}
             />
@@ -301,13 +312,32 @@ export default function Library({ onOpenBook, onOpenHighlights }: LibraryProps) 
               style={{ boxShadow: '0 0 0 5px #070b13, var(--tw-shadow, 0 0 #0000)' }}
             >
               <div className="absolute inset-0 rounded-xl ring-1 ring-inset ring-[#070b13] pointer-events-none z-20"></div>
-              <button 
-                onClick={(e) => handleDelete(e, book.id)}
-                className="absolute top-2 right-2 p-1.5 bg-black/50 hover:bg-red-500 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity z-10"
-                title="Delete book"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-              </button>
+              {/* Controls Overlay */}
+              <div className="absolute top-2 right-2 flex flex-col gap-2 z-30 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button 
+                  onClick={(e) => handleTogglePinned(e, book.id)}
+                  className={`p-1.5 rounded-lg backdrop-blur-md border border-white/20 transition-all ${book.isPinned ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30' : 'bg-black/40 text-gray-300 hover:bg-black/60'}`}
+                  title={book.isPinned ? "Unpin book" : "Pin book"}
+                >
+                  <svg className="w-4 h-4" fill={book.isPinned ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 16v4m-4-6.5C8 11 10 9 12 9s4 2 4 4.5v2.5H8v-2.5zM7 16h10v1H7v-1z" />
+                  </svg>
+                </button>
+                <button 
+                  onClick={(e) => handleToggleFavourite(e, book.id)}
+                  className={`p-1.5 rounded-lg backdrop-blur-md border border-white/20 transition-all ${book.isFavourite ? 'bg-red-500 text-white shadow-lg shadow-red-500/30' : 'bg-black/40 text-gray-300 hover:bg-black/60'}`}
+                  title={book.isFavourite ? "Remove from favourites" : "Add to favourites"}
+                >
+                  <svg className="w-4 h-4" fill={book.isFavourite ? "currentColor" : "none"} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" /></svg>
+                </button>
+                <button 
+                  onClick={(e) => handleDelete(e, book.id)}
+                  className="p-1.5 bg-black/40 hover:bg-red-600/80 text-gray-300 hover:text-white rounded-lg backdrop-blur-md border border-white/20 transition-all"
+                  title="Delete book"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                </button>
+              </div>
 
               <div className={`relative ${viewMode === 'grid' ? 'aspect-[2/3] w-full' : 'aspect-[2/3] h-full'}`}>
                  <CoverImage book={book} />

@@ -14,6 +14,9 @@ export interface Book {
   lastReadAt: number;
   progressCfi?: string;
   progressPercentage: number;
+  isPinned?: boolean;
+  isFavourite?: boolean;
+  isRecommendedPinned?: boolean;
 }
 
 export interface Highlight {
@@ -152,5 +155,43 @@ export async function updateHighlightNote(id: string, note: string): Promise<voi
   if (highlight) {
     highlight.note = note;
     await db.put('highlights', highlight);
+  }
+}
+
+export async function togglePinned(id: string): Promise<void> {
+  const db = await initDB();
+  const book = await db.get('books', id);
+  if (book) {
+    book.isPinned = !book.isPinned;
+    await db.put('books', book);
+  }
+}
+
+export async function toggleFavourite(id: string): Promise<void> {
+  const db = await initDB();
+  const book = await db.get('books', id);
+  if (book) {
+    book.isFavourite = !book.isFavourite;
+    await db.put('books', book);
+  }
+}
+
+export async function toggleRecommendedPinned(id: string): Promise<void> {
+  const db = await initDB();
+  const books = await db.getAll('books');
+  
+  // Find currently pinned book (if any)
+  const currentPinned = books.find(b => b.isRecommendedPinned);
+  
+  // If we are pinning a new book, unpin the old one first
+  if (currentPinned && currentPinned.id !== id) {
+    currentPinned.isRecommendedPinned = false;
+    await db.put('books', currentPinned);
+  }
+  
+  const targetBook = await db.get('books', id);
+  if (targetBook) {
+    targetBook.isRecommendedPinned = !targetBook.isRecommendedPinned;
+    await db.put('books', targetBook);
   }
 }

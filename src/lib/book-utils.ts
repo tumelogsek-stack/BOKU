@@ -23,6 +23,18 @@ const toStr = (val: unknown): string | undefined => {
 };
 
 export async function processBook(file: File): Promise<ProcessedBookMetadata> {
+  const isPDF = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+
+  if (isPDF) {
+    const { makePDF } = await import('./pdf-adapter');
+    const bookData = await makePDF(file);
+    return {
+      title: bookData.metadata.title || file.name.replace(/\.[^/.]+$/, ""),
+      author: bookData.metadata.author || "Unknown Author",
+      cover: bookData.getCover ? await bookData.getCover() : null
+    };
+  }
+
   // foliate-js is an ES module and needs specific file imports
   const { makeBook } = await import("foliate-js/view.js");
   const bookData: FoliateBook = await makeBook(file);
